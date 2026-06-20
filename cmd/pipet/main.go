@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/bjesus/pipet/common"
 	"github.com/bjesus/pipet/internal/app"
 	"github.com/bjesus/pipet/outputs"
+	"github.com/bjesus/pipet/parsers"
 	"github.com/bjesus/pipet/utils"
 )
 
@@ -40,6 +40,16 @@ func main() {
 				Aliases: []string{"j"},
 				Usage:   "output as JSON",
 			},
+			&cli.BoolFlag{
+				Name:    "csv",
+				Aliases: []string{"C"},
+				Usage:   "output as CSV",
+			},
+			&cli.StringSliceFlag{
+				Name:    "csv-header",
+				Aliases: []string{"H"},
+				Usage:   "CSV header columns (can be used multiple times)",
+			},
 			&cli.StringFlag{
 				Name:    "template",
 				Aliases: []string{"t"},
@@ -49,6 +59,11 @@ func main() {
 				Name:    "separator",
 				Aliases: []string{"s"},
 				Usage:   "set a separator for text output (can be used multiple times)",
+			},
+			&cli.StringFlag{
+				Name:    "block",
+				Aliases: []string{"b"},
+				Usage:   "only run blocks matching this name pattern (supports wildcards)",
 			},
 			&cli.IntFlag{
 				Name:    "max-pages",
@@ -66,6 +81,11 @@ func main() {
 				Name:    "on-change",
 				Aliases: []string{"c"},
 				Usage:   "a command to run when the pipet result is new",
+			},
+			&cli.BoolFlag{
+				Name:    "stable",
+				Aliases: []string{"S"},
+				Usage:   "use stable fingerprint for change detection (ignores field order, whitespace, etc.)",
 			},
 			&cli.BoolFlag{
 				Name:    "verbose",
@@ -90,9 +110,13 @@ func main() {
 
 func runPipet(c *cli.Context, specFile string) error {
 	jsonOutput := c.Bool("json")
+	csvOutput := c.Bool("csv")
+	csvHeader := c.StringSlice("csv-header")
 	separators := c.StringSlice("separator")
 	templateFile := c.String("template")
 	onChange := c.String("on-change")
+	blockName := c.String("block")
+	stableDiff := c.Bool("stable")
 	maxPages := c.Int("max-pages")
 	interval := c.Int("interval")
 	verbose := c.Bool("verbose")
@@ -111,6 +135,8 @@ func runPipet(c *cli.Context, specFile string) error {
 	pipet := &common.PipetApp{
 		MaxPages:  maxPages,
 		Separator: separators,
+		CSVHeader: csvHeader,
+		BlockName: blockName,
 	}
 
 	log.Println("Parsing pipet file:", specFile)
@@ -121,19 +147,29 @@ func runPipet(c *cli.Context, specFile string) error {
 
 	iterate := true
 	previousValue := ""
+	previousFingerprint := ""
+	isFirstRun := true
 
 	for iterate {
 		newValue := ""
 		log.Println("Executing blocks")
 		err = app.ExecuteBlocks(pipet)
 		if err != nil {
+			parsers.CloseSharedBrowser()
 			return fmt.Errorf("error executing blocks: %w", err)
 		}
 
 		log.Println("Generating output")
 
+		var outputErr error
 		if jsonOutput {
 			newValue = outputs.OutputJSON(pipet)
+		} else if csvOutput {
+			newValue, outputErr = outputs.OutputCSV(pipet)
+			if outputErr != nil {
+				parsers.CloseSharedBrowser()
+				return outputErr
+			}
 		} else if templateFile != "" {
 			newValue = outputs.OutputTemplate(pipet, templateFile)
 		} else {
@@ -143,17 +179,32 @@ func runPipet(c *cli.Context, specFile string) error {
 		fmt.Print(newValue)
 
 		if interval > 0 {
-			if onChange != "" && previousValue != newValue {
-				command := strings.ReplaceAll(onChange, "{}", strconv.Quote(newValue))
+			changed := false
+			if stableDiff {
+				currentFingerprint := utils.StableFingerprint(pipet.Data)
+				if !isFirstRun && previousFingerprint != currentFingerprint {
+					changed = true
+				}
+				previousFingerprint = currentFingerprint
+			} else {
+				if !isFirstRun && previousValue != newValue {
+					changed = true
+				}
+				previousValue = newValue
+			}
+
+			if onChange != "" && changed {
+				command := strings.ReplaceAll(onChange, "{}", utils.BashQuote(newValue))
 				log.Println("Executing on change command: " + command)
 				cmd := exec.Command("bash", "-c", command)
 				cmd.Output()
-				previousValue = newValue
 			}
+			isFirstRun = false
 			pipet.Data = []interface{}{}
 			time.Sleep(time.Duration(interval) * time.Second)
 		} else {
 			iterate = false
+			parsers.CloseSharedBrowser()
 		}
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/bjesus/pipet/common"
@@ -22,6 +23,7 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 
 	scanner := bufio.NewScanner(file)
 	var currentBlock *common.Block
+	var pendingBlockName string
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -31,20 +33,27 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 				e.Blocks = append(e.Blocks, *currentBlock)
 				currentBlock = nil
 			}
+			pendingBlockName = ""
 			continue
 		}
 
 		if strings.HasPrefix(line, "//") {
+			comment := strings.TrimSpace(strings.TrimPrefix(line, "//"))
+			if strings.HasPrefix(comment, "name:") {
+				pendingBlockName = strings.TrimSpace(strings.TrimPrefix(comment, "name:"))
+			}
 			continue
 		}
+
 		if currentBlock == nil {
 			if strings.HasPrefix(line, "curl ") {
-				currentBlock = &common.Block{Type: "curl", Command: line}
+				currentBlock = &common.Block{Type: "curl", Command: line, Name: pendingBlockName}
 			} else if strings.HasPrefix(line, "playwright ") {
-				currentBlock = &common.Block{Type: "playwright", Command: line}
+				currentBlock = &common.Block{Type: "playwright", Command: line, Name: pendingBlockName}
 			} else {
 				return fmt.Errorf("invalid block start: %s", line)
 			}
+			pendingBlockName = ""
 		} else {
 			if strings.HasPrefix(line, "> ") {
 
@@ -65,6 +74,10 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 
 func ExecuteBlocks(e *common.PipetApp) error {
 	for _, block := range e.Blocks {
+		if !blockNameMatches(block.Name, e.BlockName) {
+			continue
+		}
+
 		var data interface{}
 		var err error
 		var nextPageURL string
@@ -106,6 +119,22 @@ func ExecuteBlocks(e *common.PipetApp) error {
 	}
 
 	return nil
+}
+
+func blockNameMatches(blockName, pattern string) bool {
+	if pattern == "" {
+		return true
+	}
+
+	if blockName == "" {
+		return false
+	}
+
+	matched, err := path.Match(pattern, blockName)
+	if err != nil {
+		return false
+	}
+	return matched
 }
 
 func concatenateURLs(base, ref string) string {

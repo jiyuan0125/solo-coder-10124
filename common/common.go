@@ -5,6 +5,7 @@ type Block struct {
 	Command  interface{}
 	Queries  []string
 	NextPage string
+	Name     string
 }
 
 type PipetApp struct {
@@ -12,4 +13,6 @@ type PipetApp struct {
 	Data      []interface{}
 	MaxPages  int
 	Separator []string
+	CSVHeader []string
+	BlockName string
 }
