@@ -6,12 +6,19 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"path"
 	"strings"
+	"sync"
 
 	"github.com/bjesus/pipet/common"
 	"github.com/bjesus/pipet/parsers"
+	"github.com/bjesus/pipet/utils"
 	"github.com/google/shlex"
+)
+
+var (
+	pwOnce     sync.Once
+	pwInstance *parsers.PlaywrightSession
+	pwErr      error
 )
 
 func ParseSpecFile(e *common.PipetApp, filename string) error {
@@ -23,7 +30,7 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 
 	scanner := bufio.NewScanner(file)
 	var currentBlock *common.Block
-	var pendingBlockName string
+	pendingName := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -33,27 +40,26 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 				e.Blocks = append(e.Blocks, *currentBlock)
 				currentBlock = nil
 			}
-			pendingBlockName = ""
+			pendingName = ""
 			continue
 		}
 
 		if strings.HasPrefix(line, "//") {
-			comment := strings.TrimSpace(strings.TrimPrefix(line, "//"))
-			if strings.HasPrefix(comment, "name:") {
-				pendingBlockName = strings.TrimSpace(strings.TrimPrefix(comment, "name:"))
+			trimmed := strings.TrimSpace(strings.TrimPrefix(line, "//"))
+			if trimmed != "" && currentBlock == nil {
+				pendingName = trimmed
 			}
 			continue
 		}
-
 		if currentBlock == nil {
 			if strings.HasPrefix(line, "curl ") {
-				currentBlock = &common.Block{Type: "curl", Command: line, Name: pendingBlockName}
+				currentBlock = &common.Block{Type: "curl", Command: line, Name: pendingName}
 			} else if strings.HasPrefix(line, "playwright ") {
-				currentBlock = &common.Block{Type: "playwright", Command: line, Name: pendingBlockName}
+				currentBlock = &common.Block{Type: "playwright", Command: line, Name: pendingName}
 			} else {
 				return fmt.Errorf("invalid block start: %s", line)
 			}
-			pendingBlockName = ""
+			pendingName = ""
 		} else {
 			if strings.HasPrefix(line, "> ") {
 
@@ -72,12 +78,22 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 	return scanner.Err()
 }
 
-func ExecuteBlocks(e *common.PipetApp) error {
-	for _, block := range e.Blocks {
-		if !blockNameMatches(block.Name, e.BlockName) {
-			continue
+func filterBlocks(blocks []common.Block, pattern string) []common.Block {
+	if pattern == "" {
+		return blocks
+	}
+	var filtered []common.Block
+	for _, block := range blocks {
+		if utils.MatchWildcard(pattern, block.Name) {
+			filtered = append(filtered, block)
 		}
+	}
+	return filtered
+}
 
+func ExecuteBlocks(e *common.PipetApp, blockFilter string) error {
+	blocks := filterBlocks(e.Blocks, blockFilter)
+	for _, block := range blocks {
 		var data interface{}
 		var err error
 		var nextPageURL string
@@ -86,7 +102,11 @@ func ExecuteBlocks(e *common.PipetApp) error {
 			if block.Type == "curl" {
 				data, nextPageURL, err = parsers.ExecuteCurlBlock(block)
 			} else if block.Type == "playwright" {
-				data, err = parsers.ExecutePlaywrightBlock(block)
+				session, sErr := getPlaywrightSession()
+				if sErr != nil {
+					return sErr
+				}
+				data, err = parsers.ExecutePlaywrightBlockWithSession(session, block)
 			}
 
 			if err != nil {
@@ -121,20 +141,17 @@ func ExecuteBlocks(e *common.PipetApp) error {
 	return nil
 }
 
-func blockNameMatches(blockName, pattern string) bool {
-	if pattern == "" {
-		return true
-	}
+func getPlaywrightSession() (*parsers.PlaywrightSession, error) {
+	pwOnce.Do(func() {
+		pwInstance, pwErr = parsers.InitPlaywrightSession()
+	})
+	return pwInstance, pwErr
+}
 
-	if blockName == "" {
-		return false
+func CleanupPlaywrightSession() {
+	if pwInstance != nil {
+		pwInstance.Close()
 	}
-
-	matched, err := path.Match(pattern, blockName)
-	if err != nil {
-		return false
-	}
-	return matched
 }
 
 func concatenateURLs(base, ref string) string {
@@ -147,7 +164,6 @@ func concatenateURLs(base, ref string) string {
 		panic(err)
 	}
 
-	// Resolve reference URL relative to the base URL
 	fullURL := baseURL.ResolveReference(refURL)
 
 	return fullURL.String()

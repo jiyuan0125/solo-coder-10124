@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"reflect"
@@ -10,16 +12,6 @@ import (
 
 	"github.com/bjesus/pipet/common"
 )
-
-func BashQuote(s string) string {
-	if s == "" {
-		return "''"
-	}
-	if !strings.ContainsAny(s, "$`'\"\\\n\t ") {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
 
 func FlattenNestedSlices(app *common.PipetApp, data interface{}, level int) string {
 	v := reflect.ValueOf(data)
@@ -68,63 +60,89 @@ func FileExists(path string) bool {
 	return !os.IsNotExist(err)
 }
 
+func BashQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func MatchWildcard(pattern, name string) bool {
+	if pattern == "" {
+		return true
+	}
+	if name == "" {
+		name = "default"
+	}
+	patternParts := strings.Split(pattern, "*")
+	if len(patternParts) == 1 {
+		return pattern == name
+	}
+	if !strings.HasPrefix(name, patternParts[0]) {
+		return false
+	}
+	current := name[len(patternParts[0]):]
+	for i := 1; i < len(patternParts); i++ {
+		part := patternParts[i]
+		if part == "" {
+			continue
+		}
+		idx := strings.Index(current, part)
+		if idx == -1 {
+			return false
+		}
+		current = current[idx+len(part):]
+	}
+	return true
+}
+
 func StableFingerprint(data interface{}) string {
-	var buf strings.Builder
-	writeStableValue(&buf, data)
-	return buf.String()
+	normalized := normalizeForFingerprint(data)
+	h := sha256.New()
+	h.Write([]byte(fmt.Sprintf("%v", normalized)))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-func writeStableValue(buf *strings.Builder, v interface{}) {
-	switch val := v.(type) {
-	case nil:
-		buf.WriteString("null")
-	case bool:
-		if val {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
+func normalizeForFingerprint(data interface{}) interface{} {
+	if data == nil {
+		return nil
+	}
+	v := reflect.ValueOf(data)
+	switch v.Kind() {
+	case reflect.String:
+		s := v.String()
+		s = strings.ToLower(s)
+		s = strings.Join(strings.Fields(s), " ")
+		return s
+	case reflect.Slice, reflect.Array:
+		var items []interface{}
+		for i := 0; i < v.Len(); i++ {
+			items = append(items, normalizeForFingerprint(v.Index(i).Interface()))
 		}
-	case float64:
-		buf.WriteString(fmt.Sprintf("%g", val))
-	case string:
-		buf.WriteString("s:")
-		buf.WriteString(normalizeString(val))
-	case []interface{}:
-		buf.WriteString("[")
-		for i, elem := range val {
-			if i > 0 {
-				buf.WriteString(",")
-			}
-			writeStableValue(buf, elem)
+		return items
+	case reflect.Map:
+		type kv struct {
+			K string
+			V interface{}
 		}
-		buf.WriteString("]")
-	case map[string]interface{}:
-		buf.WriteString("{")
-		keys := make([]string, 0, len(val))
-		for k := range val {
-			keys = append(keys, k)
+		var pairs []kv
+		for _, key := range v.MapKeys() {
+			pairs = append(pairs, kv{
+				K: strings.ToLower(fmt.Sprint(key.Interface())),
+				V: normalizeForFingerprint(v.MapIndex(key).Interface()),
+			})
 		}
-		sort.Strings(keys)
-		for i, k := range keys {
-			if i > 0 {
-				buf.WriteString(",")
-			}
-			buf.WriteString(k)
-			buf.WriteString(":")
-			writeStableValue(buf, val[k])
+		sort.Slice(pairs, func(i, j int) bool {
+			return pairs[i].K < pairs[j].K
+		})
+		var result []interface{}
+		for _, p := range pairs {
+			result = append(result, []interface{}{p.K, p.V})
 		}
-		buf.WriteString("}")
+		return result
+	case reflect.Ptr, reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return normalizeForFingerprint(v.Elem().Interface())
 	default:
-		buf.WriteString(fmt.Sprint(v))
+		return data
 	}
-}
-
-func normalizeString(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\t", " ")
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
-	return s
 }

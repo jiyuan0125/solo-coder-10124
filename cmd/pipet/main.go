@@ -15,7 +15,6 @@ import (
 	"github.com/bjesus/pipet/common"
 	"github.com/bjesus/pipet/internal/app"
 	"github.com/bjesus/pipet/outputs"
-	"github.com/bjesus/pipet/parsers"
 	"github.com/bjesus/pipet/utils"
 )
 
@@ -25,7 +24,7 @@ func main() {
 		Name:  "version",
 		Usage: "print the pipet version",
 	}
-	app := &cli.App{
+	application := &cli.App{
 		Name:                   "pipet",
 		Usage:                  "swiss-army tool for web scraping, made for hackers",
 		HideHelpCommand:        true,
@@ -40,30 +39,25 @@ func main() {
 				Aliases: []string{"j"},
 				Usage:   "output as JSON",
 			},
-			&cli.BoolFlag{
-				Name:    "csv",
-				Aliases: []string{"C"},
-				Usage:   "output as CSV",
-			},
-			&cli.StringSliceFlag{
-				Name:    "csv-header",
-				Aliases: []string{"H"},
-				Usage:   "CSV header columns (can be used multiple times)",
-			},
 			&cli.StringFlag{
 				Name:    "template",
 				Aliases: []string{"t"},
 				Usage:   "path to file for template output",
 			},
+			&cli.BoolFlag{
+				Name:    "csv",
+				Aliases: []string{"C"},
+				Usage:   "output as CSV, one record per line",
+			},
+			&cli.StringSliceFlag{
+				Name:    "csv-header",
+				Aliases: []string{"H"},
+				Usage:   "column name for CSV output, can be used multiple times",
+			},
 			&cli.StringSliceFlag{
 				Name:    "separator",
 				Aliases: []string{"s"},
 				Usage:   "set a separator for text output (can be used multiple times)",
-			},
-			&cli.StringFlag{
-				Name:    "block",
-				Aliases: []string{"b"},
-				Usage:   "only run blocks matching this name pattern (supports wildcards)",
 			},
 			&cli.IntFlag{
 				Name:    "max-pages",
@@ -82,10 +76,15 @@ func main() {
 				Aliases: []string{"c"},
 				Usage:   "a command to run when the pipet result is new",
 			},
+			&cli.StringFlag{
+				Name:    "block",
+				Aliases: []string{"b"},
+				Usage:   "only run blocks with names matching this pattern (supports exact match and wildcards)",
+			},
 			&cli.BoolFlag{
-				Name:    "stable",
-				Aliases: []string{"S"},
-				Usage:   "use stable fingerprint for change detection (ignores field order, whitespace, etc.)",
+				Name:    "stable-fingerprint",
+				Aliases: []string{"f"},
+				Usage:   "use stable fingerprint comparison for on-change (field order, whitespace, quote case insensitive)",
 			},
 			&cli.BoolFlag{
 				Name:    "verbose",
@@ -102,8 +101,8 @@ func main() {
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
-		log.Println("pipet version", app.Version)
+	if err := application.Run(os.Args); err != nil {
+		log.Println("pipet version", application.Version)
 		log.Fatal(err)
 	}
 }
@@ -115,11 +114,11 @@ func runPipet(c *cli.Context, specFile string) error {
 	separators := c.StringSlice("separator")
 	templateFile := c.String("template")
 	onChange := c.String("on-change")
-	blockName := c.String("block")
-	stableDiff := c.Bool("stable")
 	maxPages := c.Int("max-pages")
 	interval := c.Int("interval")
 	verbose := c.Bool("verbose")
+	blockFilter := c.String("block")
+	stableFingerprint := c.Bool("stable-fingerprint")
 
 	if !verbose {
 		log.SetOutput(io.Discard)
@@ -127,16 +126,16 @@ func runPipet(c *cli.Context, specFile string) error {
 
 	automaticTemplateFile := strings.TrimSuffix(specFile, filepath.Ext(specFile)) + ".tpl"
 
-	if !jsonOutput && templateFile == "" && utils.FileExists(automaticTemplateFile) {
+	if !jsonOutput && !csvOutput && templateFile == "" && utils.FileExists(automaticTemplateFile) {
 		log.Println("Detected template file at", specFile)
 		templateFile = automaticTemplateFile
 	}
 
 	pipet := &common.PipetApp{
-		MaxPages:  maxPages,
-		Separator: separators,
-		CSVHeader: csvHeader,
-		BlockName: blockName,
+		MaxPages:          maxPages,
+		Separator:         separators,
+		CSVHeader:         csvHeader,
+		StableFingerprint: stableFingerprint,
 	}
 
 	log.Println("Parsing pipet file:", specFile)
@@ -145,31 +144,30 @@ func runPipet(c *cli.Context, specFile string) error {
 		return fmt.Errorf("error parsing spec file: %w", err)
 	}
 
+	defer app.CleanupPlaywrightSession()
+
 	iterate := true
 	previousValue := ""
-	previousFingerprint := ""
 	isFirstRun := true
 
 	for iterate {
 		newValue := ""
 		log.Println("Executing blocks")
-		err = app.ExecuteBlocks(pipet)
+		err = app.ExecuteBlocks(pipet, blockFilter)
 		if err != nil {
-			parsers.CloseSharedBrowser()
 			return fmt.Errorf("error executing blocks: %w", err)
 		}
 
 		log.Println("Generating output")
 
-		var outputErr error
 		if jsonOutput {
 			newValue = outputs.OutputJSON(pipet)
 		} else if csvOutput {
-			newValue, outputErr = outputs.OutputCSV(pipet)
-			if outputErr != nil {
-				parsers.CloseSharedBrowser()
-				return outputErr
+			csvStr, csvErr := outputs.OutputCSV(pipet)
+			if csvErr != nil {
+				return csvErr
 			}
+			newValue = csvStr
 		} else if templateFile != "" {
 			newValue = outputs.OutputTemplate(pipet, templateFile)
 		} else {
@@ -179,32 +177,26 @@ func runPipet(c *cli.Context, specFile string) error {
 		fmt.Print(newValue)
 
 		if interval > 0 {
-			changed := false
-			if stableDiff {
-				currentFingerprint := utils.StableFingerprint(pipet.Data)
-				if !isFirstRun && previousFingerprint != currentFingerprint {
-					changed = true
+			if onChange != "" && !isFirstRun {
+				changed := false
+				if stableFingerprint {
+					changed = utils.StableFingerprint(previousValue) != utils.StableFingerprint(newValue)
+				} else {
+					changed = previousValue != newValue
 				}
-				previousFingerprint = currentFingerprint
-			} else {
-				if !isFirstRun && previousValue != newValue {
-					changed = true
+				if changed {
+					command := strings.ReplaceAll(onChange, "{}", utils.BashQuote(newValue))
+					log.Println("Executing on change command: " + command)
+					cmd := exec.Command("bash", "-c", command)
+					cmd.Output()
 				}
-				previousValue = newValue
 			}
-
-			if onChange != "" && changed {
-				command := strings.ReplaceAll(onChange, "{}", utils.BashQuote(newValue))
-				log.Println("Executing on change command: " + command)
-				cmd := exec.Command("bash", "-c", command)
-				cmd.Output()
-			}
+			previousValue = newValue
 			isFirstRun = false
 			pipet.Data = []interface{}{}
 			time.Sleep(time.Duration(interval) * time.Second)
 		} else {
 			iterate = false
-			parsers.CloseSharedBrowser()
 		}
 	}
 	return nil

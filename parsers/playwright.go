@@ -2,21 +2,18 @@ package parsers
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/bjesus/pipet/common"
 	"github.com/playwright-community/playwright-go"
 )
 
-var sharedPlaywright *playwright.Playwright
-var sharedBrowser playwright.Browser
+type PlaywrightSession struct {
+	PW      *playwright.Playwright
+	Browser playwright.Browser
+}
 
-func getSharedBrowser() (playwright.Browser, error) {
-	if sharedBrowser != nil {
-		return sharedBrowser, nil
-	}
-
+func InitPlaywrightSession() (*PlaywrightSession, error) {
 	err := playwright.Install()
 	if err != nil {
 		return nil, fmt.Errorf("failed to install playwright: %w", err)
@@ -26,36 +23,36 @@ func getSharedBrowser() (playwright.Browser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to start playwright: %w", err)
 	}
-	sharedPlaywright = pw
 
 	browser, err := pw.Chromium.Launch()
 	if err != nil {
+		pw.Stop()
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
-	sharedBrowser = browser
 
-	log.Println("Playwright browser started and ready for reuse")
-	return sharedBrowser, nil
+	return &PlaywrightSession{PW: pw, Browser: browser}, nil
 }
 
-func CloseSharedBrowser() {
-	if sharedBrowser != nil {
-		sharedBrowser.Close()
-		sharedBrowser = nil
+func (s *PlaywrightSession) Close() {
+	if s.Browser != nil {
+		s.Browser.Close()
 	}
-	if sharedPlaywright != nil {
-		sharedPlaywright.Stop()
-		sharedPlaywright = nil
+	if s.PW != nil {
+		s.PW.Stop()
 	}
 }
 
 func ExecutePlaywrightBlock(block common.Block) (interface{}, error) {
-	browser, err := getSharedBrowser()
+	session, err := InitPlaywrightSession()
 	if err != nil {
 		return nil, err
 	}
+	defer session.Close()
+	return ExecutePlaywrightBlockWithSession(session, block)
+}
 
-	page, err := browser.NewPage()
+func ExecutePlaywrightBlockWithSession(session *PlaywrightSession, block common.Block) (interface{}, error) {
+	page, err := session.Browser.NewPage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new page: %w", err)
 	}
