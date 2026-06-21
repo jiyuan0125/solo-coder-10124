@@ -11,6 +11,7 @@ import (
 	"github.com/bjesus/pipet/common"
 	"github.com/bjesus/pipet/parsers"
 	"github.com/google/shlex"
+	"github.com/tidwall/match"
 )
 
 func ParseSpecFile(e *common.PipetApp, filename string) error {
@@ -22,6 +23,7 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 
 	scanner := bufio.NewScanner(file)
 	var currentBlock *common.Block
+	pendingName := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -31,20 +33,30 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 				e.Blocks = append(e.Blocks, *currentBlock)
 				currentBlock = nil
 			}
+			pendingName = ""
 			continue
 		}
 
 		if strings.HasPrefix(line, "//") {
+			commentText := strings.TrimSpace(strings.TrimPrefix(line, "//"))
+			if commentText != "" {
+				pendingName = commentText
+			}
 			continue
 		}
 		if currentBlock == nil {
+			blockName := pendingName
+			if blockName == "" {
+				blockName = "default"
+			}
 			if strings.HasPrefix(line, "curl ") {
-				currentBlock = &common.Block{Type: "curl", Command: line}
+				currentBlock = &common.Block{Name: blockName, Type: "curl", Command: line}
 			} else if strings.HasPrefix(line, "playwright ") {
-				currentBlock = &common.Block{Type: "playwright", Command: line}
+				currentBlock = &common.Block{Name: blockName, Type: "playwright", Command: line}
 			} else {
 				return fmt.Errorf("invalid block start: %s", line)
 			}
+			pendingName = ""
 		} else {
 			if strings.HasPrefix(line, "> ") {
 
@@ -63,7 +75,21 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 	return scanner.Err()
 }
 
-func ExecuteBlocks(e *common.PipetApp) error {
+func FilterBlocks(e *common.PipetApp, pattern string) {
+	if pattern == "" {
+		return
+	}
+
+	var filtered []common.Block
+	for _, block := range e.Blocks {
+		if match.Match(block.Name, pattern) {
+			filtered = append(filtered, block)
+		}
+	}
+	e.Blocks = filtered
+}
+
+func ExecuteBlocks(e *common.PipetApp, browserCtx *parsers.BrowserContext) error {
 	for _, block := range e.Blocks {
 		var data interface{}
 		var err error
@@ -73,7 +99,7 @@ func ExecuteBlocks(e *common.PipetApp) error {
 			if block.Type == "curl" {
 				data, nextPageURL, err = parsers.ExecuteCurlBlock(block)
 			} else if block.Type == "playwright" {
-				data, err = parsers.ExecutePlaywrightBlock(block)
+				data, err = parsers.ExecutePlaywrightBlock(block, browserCtx)
 			}
 
 			if err != nil {

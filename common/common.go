@@ -1,6 +1,7 @@
 package common
 
 type Block struct {
+	Name     string
 	Type     string
 	Command  interface{}
 	Queries  []string

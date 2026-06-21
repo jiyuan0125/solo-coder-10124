@@ -14,7 +14,7 @@ func TestExecutePlaywrightBlock(t *testing.T) {
 		Command: "playwright http://example.com",
 		Queries: []string{"document.querySelector(\"h1\").innerText.split(\" \")", "document.querySelector(\"h1\") | wc -c"},
 	}
-	result, err := ExecutePlaywrightBlock(block)
+	result, err := ExecutePlaywrightBlock(block, nil)
 	expected := []interface{}{[]interface{}{"Example", "Domain"}, "11\n"}
 
 	assert.NoError(t, err)
