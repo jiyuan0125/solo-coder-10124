@@ -9,8 +9,8 @@ import (
 )
 
 type BrowserContext struct {
-	pw      *playwright.Playwright
-	browser playwright.Browser
+	Pw      *playwright.Playwright
+	Browser playwright.Browser
 }
 
 func InitBrowser() (*BrowserContext, error) {
@@ -30,15 +30,20 @@ func InitBrowser() (*BrowserContext, error) {
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 
-	return &BrowserContext{pw: pw, browser: browser}, nil
+	return &BrowserContext{Pw: pw, Browser: browser}, nil
 }
 
 func (bc *BrowserContext) Close() {
-	if bc.browser != nil {
-		bc.browser.Close()
+	if bc == nil {
+		return
 	}
-	if bc.pw != nil {
-		bc.pw.Stop()
+	if bc.Browser != nil {
+		bc.Browser.Close()
+		bc.Browser = nil
+	}
+	if bc.Pw != nil {
+		bc.Pw.Stop()
+		bc.Pw = nil
 	}
 }
 
@@ -47,13 +52,19 @@ func ExecutePlaywrightBlock(block common.Block, browserCtx *BrowserContext) (int
 	var browser playwright.Browser
 	var page playwright.Page
 	var err error
-	var cleanupBrowser bool
+	usingShared := false
 
-	if browserCtx != nil && browserCtx.pw != nil && browserCtx.browser != nil {
-		pw = browserCtx.pw
-		browser = browserCtx.browser
-		cleanupBrowser = false
-	} else {
+	if browserCtx != nil && browserCtx.Pw != nil && browserCtx.Browser != nil {
+		if !browserCtx.Browser.IsConnected() {
+			browserCtx.Pw = nil
+			browserCtx.Browser = nil
+		} else {
+			pw = browserCtx.Pw
+			browser = browserCtx.Browser
+			usingShared = true
+		}
+	}
+	if !usingShared {
 		err = playwright.Install()
 		if err != nil {
 			return nil, fmt.Errorf("failed to install playwright: %w", err)
@@ -70,11 +81,14 @@ func ExecutePlaywrightBlock(block common.Block, browserCtx *BrowserContext) (int
 			return nil, fmt.Errorf("failed to launch browser: %w", err)
 		}
 		defer browser.Close()
-		cleanupBrowser = true
 	}
 
 	page, err = browser.NewPage()
 	if err != nil {
+		if usingShared {
+			browserCtx.Pw = nil
+			browserCtx.Browser = nil
+		}
 		return nil, fmt.Errorf("failed to create new page: %w", err)
 	}
 	defer page.Close()
@@ -91,6 +105,10 @@ func ExecutePlaywrightBlock(block common.Block, browserCtx *BrowserContext) (int
 		WaitUntil: playwright.WaitUntilStateNetworkidle,
 	})
 	if err != nil {
+		if usingShared {
+			browserCtx.Pw = nil
+			browserCtx.Browser = nil
+		}
 		return nil, fmt.Errorf("failed to navigate to %s: %w", url, err)
 	}
 
@@ -102,12 +120,20 @@ func ExecutePlaywrightBlock(block common.Block, browserCtx *BrowserContext) (int
 
 		value, err := page.Evaluate(jsQuery)
 		if err != nil {
+			if usingShared {
+				browserCtx.Pw = nil
+				browserCtx.Browser = nil
+			}
 			return nil, fmt.Errorf("failed to evaluate JavaScript: %w", err)
 		}
 
 		if len(parts) > 1 {
 			pipedValue, err := ExecutePipe(fmt.Sprintf("%v", value), strings.TrimSpace(parts[1]))
 			if err != nil {
+				if usingShared {
+					browserCtx.Pw = nil
+					browserCtx.Browser = nil
+				}
 				return nil, fmt.Errorf("failed to execute pipe: %w", err)
 			}
 			result = append(result, pipedValue)
@@ -116,6 +142,5 @@ func ExecutePlaywrightBlock(block common.Block, browserCtx *BrowserContext) (int
 		}
 	}
 
-	_ = cleanupBrowser
 	return result, nil
 }

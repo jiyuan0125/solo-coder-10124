@@ -9,8 +9,10 @@ type Block struct {
 }
 
 type PipetApp struct {
-	Blocks    []Block
-	Data      []interface{}
-	MaxPages  int
-	Separator []string
+	Blocks     []Block
+	Data       []interface{}
+	BlockNames []string
+	CSVHeaders []string
+	MaxPages   int
+	Separator  []string
 }

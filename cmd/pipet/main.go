@@ -41,22 +41,22 @@ func main() {
 				Usage:   "output as JSON",
 			},
 			&cli.BoolFlag{
-				Name:    "lines",
-				Aliases: []string{"l"},
-				Usage:   "output as CSV lines, one record per line",
+				Name:    "csv",
+				Aliases: []string{"C"},
+				Usage:   "output as CSV, one record per line, empty line between blocks",
 			},
 			&cli.StringSliceFlag{
-				Name:    "header",
-				Aliases: []string{"d"},
-				Usage:   "column header for lines output (can be used multiple times)",
+				Name:    "csv-header",
+				Aliases: []string{"H"},
+				Usage:   "column header for CSV output (can be used multiple times)",
 			},
 			&cli.StringFlag{
-				Name:    "block",
-				Aliases: []string{"b"},
-				Usage:   "only run blocks with names matching this pattern (supports wildcards)",
+				Name:    "only-blocks",
+				Aliases: []string{"o"},
+				Usage:   "only run blocks with names matching these comma-separated glob patterns (* and ?)",
 			},
 			&cli.BoolFlag{
-				Name:    "stable-diff",
+				Name:    "stable-fingerprint",
 				Aliases: []string{"f"},
 				Usage:   "use stable fingerprint for on-change comparison (ignores whitespace, key order, etc.)",
 			},
@@ -111,10 +111,10 @@ func main() {
 
 func runPipet(c *cli.Context, specFile string) error {
 	jsonOutput := c.Bool("json")
-	linesOutput := c.Bool("lines")
-	headers := c.StringSlice("header")
-	blockPattern := c.String("block")
-	stableDiff := c.Bool("stable-diff")
+	csvOutput := c.Bool("csv")
+	csvHeaders := c.StringSlice("csv-header")
+	onlyBlocks := c.String("only-blocks")
+	stableFingerprint := c.Bool("stable-fingerprint")
 	separators := c.StringSlice("separator")
 	templateFile := c.String("template")
 	onChange := c.String("on-change")
@@ -128,14 +128,15 @@ func runPipet(c *cli.Context, specFile string) error {
 
 	automaticTemplateFile := strings.TrimSuffix(specFile, filepath.Ext(specFile)) + ".tpl"
 
-	if !jsonOutput && !linesOutput && templateFile == "" && utils.FileExists(automaticTemplateFile) {
+	if !jsonOutput && !csvOutput && templateFile == "" && utils.FileExists(automaticTemplateFile) {
 		log.Println("Detected template file at", specFile)
 		templateFile = automaticTemplateFile
 	}
 
 	pipet := &common.PipetApp{
-		MaxPages:  maxPages,
-		Separator: separators,
+		MaxPages:   maxPages,
+		Separator:  separators,
+		CSVHeaders: csvHeaders,
 	}
 
 	log.Println("Parsing pipet file:", specFile)
@@ -144,9 +145,9 @@ func runPipet(c *cli.Context, specFile string) error {
 		return fmt.Errorf("error parsing spec file: %w", err)
 	}
 
-	if blockPattern != "" {
-		log.Println("Filtering blocks by pattern:", blockPattern)
-		app.FilterBlocks(pipet, blockPattern)
+	if onlyBlocks != "" {
+		log.Println("Filtering blocks by patterns:", onlyBlocks)
+		app.FilterBlocks(pipet, onlyBlocks)
 	}
 
 	hasPlaywright := false
@@ -173,6 +174,14 @@ func runPipet(c *cli.Context, specFile string) error {
 	isFirstIteration := true
 
 	for iterate {
+		if interval > 0 && hasPlaywright && (browserCtx == nil || browserCtx.Pw == nil || browserCtx.Browser == nil) {
+			log.Println("Re-initializing persistent browser for polling")
+			browserCtx, err = parsers.InitBrowser()
+			if err != nil {
+				return fmt.Errorf("error re-initializing browser: %w", err)
+			}
+		}
+
 		newValue := ""
 		log.Println("Executing blocks")
 		err = app.ExecuteBlocks(pipet, browserCtx)
@@ -184,11 +193,11 @@ func runPipet(c *cli.Context, specFile string) error {
 
 		if jsonOutput {
 			newValue = outputs.OutputJSON(pipet)
-		} else if linesOutput {
-			var linesErr error
-			newValue, linesErr = outputs.OutputLines(pipet, headers)
-			if linesErr != nil {
-				return fmt.Errorf("error generating lines output: %w", linesErr)
+		} else if csvOutput {
+			var csvErr error
+			newValue, csvErr = outputs.OutputCSV(pipet)
+			if csvErr != nil {
+				return fmt.Errorf("error generating CSV output: %w", csvErr)
 			}
 		} else if templateFile != "" {
 			newValue = outputs.OutputTemplate(pipet, templateFile)
@@ -201,7 +210,7 @@ func runPipet(c *cli.Context, specFile string) error {
 		if interval > 0 {
 			if onChange != "" && !isFirstIteration {
 				changed := false
-				if stableDiff {
+				if stableFingerprint {
 					currentFingerprint := utils.StableFingerprint(pipet.Data)
 					if previousFingerprint != "" && currentFingerprint != previousFingerprint {
 						changed = true
@@ -221,7 +230,7 @@ func runPipet(c *cli.Context, specFile string) error {
 					cmd.Output()
 				}
 			} else if isFirstIteration {
-				if stableDiff {
+				if stableFingerprint {
 					previousFingerprint = utils.StableFingerprint(pipet.Data)
 				} else {
 					previousValue = newValue
@@ -229,6 +238,7 @@ func runPipet(c *cli.Context, specFile string) error {
 			}
 			isFirstIteration = false
 			pipet.Data = []interface{}{}
+			pipet.BlockNames = []string{}
 			time.Sleep(time.Duration(interval) * time.Second)
 		} else {
 			iterate = false

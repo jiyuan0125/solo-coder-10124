@@ -39,16 +39,13 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 
 		if strings.HasPrefix(line, "//") {
 			commentText := strings.TrimSpace(strings.TrimPrefix(line, "//"))
-			if commentText != "" {
-				pendingName = commentText
+			if strings.HasPrefix(commentText, "name:") {
+				pendingName = strings.TrimSpace(strings.TrimPrefix(commentText, "name:"))
 			}
 			continue
 		}
 		if currentBlock == nil {
 			blockName := pendingName
-			if blockName == "" {
-				blockName = "default"
-			}
 			if strings.HasPrefix(line, "curl ") {
 				currentBlock = &common.Block{Name: blockName, Type: "curl", Command: line}
 			} else if strings.HasPrefix(line, "playwright ") {
@@ -75,14 +72,30 @@ func ParseSpecFile(e *common.PipetApp, filename string) error {
 	return scanner.Err()
 }
 
-func FilterBlocks(e *common.PipetApp, pattern string) {
-	if pattern == "" {
+func FilterBlocks(e *common.PipetApp, patterns string) {
+	if patterns == "" {
 		return
+	}
+
+	patternList := strings.Split(patterns, ",")
+	for i := range patternList {
+		patternList[i] = strings.TrimSpace(patternList[i])
 	}
 
 	var filtered []common.Block
 	for _, block := range e.Blocks {
-		if match.Match(block.Name, pattern) {
+		matched := false
+		for _, pattern := range patternList {
+			if pattern == "" {
+				matched = true
+				break
+			}
+			if match.Match(block.Name, pattern) {
+				matched = true
+				break
+			}
+		}
+		if matched {
 			filtered = append(filtered, block)
 		}
 	}
@@ -107,6 +120,7 @@ func ExecuteBlocks(e *common.PipetApp, browserCtx *parsers.BrowserContext) error
 			}
 
 			e.Data = append(e.Data, data)
+			e.BlockNames = append(e.BlockNames, block.Name)
 
 			if nextPageURL == "" {
 				break

@@ -3,15 +3,30 @@ package outputs
 import (
 	"encoding/csv"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 
 	"github.com/bjesus/pipet/common"
 )
 
-func OutputLines(app *common.PipetApp, headers []string) (string, error) {
+func OutputCSV(app *common.PipetApp) (string, error) {
 	var result strings.Builder
+	headers := app.CSVHeaders
 	headerCount := len(headers)
+
+	trimmedHeaders := make([]string, headerCount)
+	for i, h := range headers {
+		trimmedHeaders[i] = strings.TrimSpace(h)
+	}
+
+	if len(app.Data) == 0 && headerCount > 0 {
+		headerLine, err := formatCSVLine(trimmedHeaders)
+		if err != nil {
+			return "", err
+		}
+		return headerLine + "\n", nil
+	}
 
 	blocks := collectFinestRecords(app.Data)
 
@@ -21,7 +36,7 @@ func OutputLines(app *common.PipetApp, headers []string) (string, error) {
 		}
 
 		if headerCount > 0 && bi == 0 {
-			headerLine, err := formatCSVLine(headers)
+			headerLine, err := formatCSVLine(trimmedHeaders)
 			if err != nil {
 				return "", err
 			}
@@ -29,10 +44,19 @@ func OutputLines(app *common.PipetApp, headers []string) (string, error) {
 			result.WriteString("\n")
 		}
 
+		var blockIdentifier string
+		if bi < len(app.BlockNames) && app.BlockNames[bi] != "" {
+			blockIdentifier = fmt.Sprintf("block %q", app.BlockNames[bi])
+		} else {
+			blockIdentifier = fmt.Sprintf("block #%d", bi+1)
+		}
+
 		for _, record := range block {
 			fieldCount := len(record)
 			if headerCount > 0 && fieldCount != headerCount {
-				return "", fmt.Errorf("record has %d fields, but header specifies %d fields: %v", fieldCount, headerCount, record)
+				errMsg := fmt.Sprintf("%s: record has %d fields, but header specifies %d fields: %v", blockIdentifier, fieldCount, headerCount, record)
+				fmt.Fprintln(os.Stderr, errMsg)
+				return "", fmt.Errorf(errMsg)
 			}
 
 			line, err := formatCSVLine(record)
@@ -48,14 +72,32 @@ func OutputLines(app *common.PipetApp, headers []string) (string, error) {
 }
 
 func formatCSVLine(fields []string) (string, error) {
+	processed := make([]string, len(fields))
+	for i, f := range fields {
+		processed[i] = sanitizeCSVField(f)
+	}
+
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
-	err := w.Write(fields)
+	err := w.Write(processed)
 	if err != nil {
 		return "", err
 	}
 	w.Flush()
 	return strings.TrimRight(buf.String(), "\r\n"), nil
+}
+
+func sanitizeCSVField(field string) string {
+	if field == "" {
+		return field
+	}
+
+	firstChar := field[0]
+	if firstChar == '=' || firstChar == '+' || firstChar == '-' || firstChar == '@' {
+		return "\t" + field
+	}
+
+	return field
 }
 
 func collectFinestRecords(data interface{}) [][][]string {
