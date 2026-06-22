@@ -77,19 +77,23 @@ func FilterBlocks(e *common.PipetApp, patterns string) {
 		return
 	}
 
-	patternList := strings.Split(patterns, ",")
-	for i := range patternList {
-		patternList[i] = strings.TrimSpace(patternList[i])
+	rawPatterns := strings.Split(patterns, ",")
+	var patternList []string
+	for _, p := range rawPatterns {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			patternList = append(patternList, trimmed)
+		}
+	}
+
+	if len(patternList) == 0 {
+		return
 	}
 
 	var filtered []common.Block
 	for _, block := range e.Blocks {
 		matched := false
 		for _, pattern := range patternList {
-			if pattern == "" {
-				matched = true
-				break
-			}
 			if match.Match(block.Name, pattern) {
 				matched = true
 				break
